@@ -86,7 +86,7 @@
     <main>
         <h2>Contáctanos</h2>
         <p>Puedes comunicarte con nosotros a través del siguiente formulario:</p>
-        <form id="contact-form">
+        <form id="contact-form" action="TU-URL-DE-FORMSPREE" method="POST">
             <label for="nombre" style="margin-top: 15px;">Nombre:</label>
             <input type="text" id="nombre" name="nombre" required>
             
@@ -97,6 +97,7 @@
             <textarea id="mensaje" name="mensaje" rows="6" required></textarea>
             
             <button type="submit">Enviar</button>
+            <p style="font-size: 14px; color: gray;">Recibirás una confirmación por correo.</p>
         </form>
         <p id="form-message"></p>
     </main>
