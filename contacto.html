@@ -71,8 +71,8 @@
 </head>
 <body>
     <header style="display: flex; flex-direction: column; align-items: center; text-align: center; background-color: white; color: black; padding: 20px; width: 100%;">
-        <a href="index.html"><img src="logo.png" alt="Logo de Arqcaval" width="250" style="display: block; margin: 0 auto;"></a>
-        <h1>Contacto</h1>
+        <a href="index.html"><img src="logo.png" alt="Logo de Arqcaval" width="250" style="display: block; margin-left: 10px;"></a>
+        <h1 style="margin-left: 10px;">Contacto</h1>
         <nav style="margin-top: 10px; width: 100%; text-align: center;">
             <ul style="display: flex; justify-content: center; gap: 20px; padding: 0; list-style: none;">
                 <li style="display: inline;"><a href="index.html" style="text-decoration: underline; color: black;  padding: 10px 15px; background-color: white; border-radius: 5px;">Inicio</a></li>
@@ -87,13 +87,13 @@
         <h2>Contáctanos</h2>
         <p>Puedes comunicarte con nosotros a través del siguiente formulario:</p>
         <form id="contact-form">
-            <label for="nombre">Nombre:</label>
+            <label for="nombre" style="margin-top: 15px;">Nombre:</label>
             <input type="text" id="nombre" name="nombre" required>
             
-            <label for="email">Correo Electrónico:</label>
+            <label for="email" style="margin-top: 15px;">Correo Electrónico:</label>
             <input type="email" id="email" name="email" required>
             
-            <label for="mensaje">Mensaje:</label>
+            <label for="mensaje" style="margin-top: 15px;">Mensaje:</label>
             <textarea id="mensaje" name="mensaje" rows="6" required></textarea>
             
             <button type="submit">Enviar</button>
