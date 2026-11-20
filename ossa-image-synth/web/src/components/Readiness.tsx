@@ -9,7 +9,7 @@ export default function Readiness() {
   if (!modules) return <div className="readiness muted">Evaluating modules…</div>;
   const sat = ORDER.filter((k) => modules[k].readiness === "satisfied").length;
   const blocked = ORDER.filter((k) => modules[k].readiness === "blocked");
-  const exec = (["N01", "N04", "N05"] as ModuleKey[]).every((k) => modules[k].state === "VALIDATED");
+  const exec = modules.N05.requirements.some((r: any) => r.id === "authorized" && r.satisfied);
   return (
     <div className="readiness" data-testid="readiness">
       <b style={{ marginRight: 4 }}>Readiness</b>
@@ -22,8 +22,8 @@ export default function Readiness() {
         </span>
       ))}
       <div className="spacer" />
-      <span className={exec ? "pill ok" : "pill err"} title="N01, N04 and N05 must be VALIDATED (plus N02/N03 when the edit needs them)">
-        {exec ? "Ready to edit" : "Not ready to edit yet"}
+      <span className={exec ? "pill ok" : "pill err"} title="An image is the only requirement; anything else missing gives a less refined result">
+        {exec ? "Ready to edit" : "Add an image to edit"}
       </span>
     </div>
   );

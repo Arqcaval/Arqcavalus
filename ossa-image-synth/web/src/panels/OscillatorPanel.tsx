@@ -66,12 +66,16 @@ export default function OscillatorPanel() {
           )}
           {plan && (
             <>
-              {plan.gate.blockers.length > 0 ? (
-                <div className="err-box"><b>Not ready yet. Finish these first:</b>
-                  <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{plan.gate.blockers.map((b: any, i: number) => (
+              {plan.gate.blockers.length > 0 && (
+                <div className="err-box"><b>Cannot run:</b> {plan.gate.blockers.map((b: any) => b.missing.join(" ")).join(" ")}</div>
+              )}
+              {plan.gate.blockers.length === 0 && plan.gate.warnings.length > 0 && (
+                <div className="warn-box"><b>Insufficient information: the result may be less refined.</b> It will run at your responsibility.
+                  <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{plan.gate.warnings.map((b: any, i: number) => (
                     <li key={i}><a href="#" onClick={(e) => { e.preventDefault(); open(b.module); }}>{b.name}</a>: {b.missing.join("; ")}</li>))}</ul>
                 </div>
-              ) : <div className="ok-box">Ready. All required modules are validated.</div>}
+              )}
+              {plan.gate.blockers.length === 0 && plan.gate.warnings.length === 0 && <div className="ok-box">Ready. All information is in place.</div>}
               {canEdit && <div><button className="primary" disabled={!plan.ready || busy} onClick={start} data-testid="osc-run">Start run</button></div>}
             </>
           )}

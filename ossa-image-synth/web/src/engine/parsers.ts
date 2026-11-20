@@ -222,6 +222,8 @@ const MANUFACTURERS = ["Sherwin-Williams", "Benjamin Moore", "PPG", "Formica", "
   "Crossville", "Mohawk", "Interface", "Shaw", "Caesarstone", "Cambria", "Silestone", "Rockfon", "USG", "Johnsonite", "Tarkett", "Roppe",
   "Hoshizaki", "Manitowoc", "True", "Traulsen", "Vulcan", "Frymaster", "Pitco", "Hobart", "Rational", "Turbochef", "Merrychef", "Scotsman",
   "Beverage-Air", "Perlick", "Krowne", "Eagle", "Advance Tabco", "Bunn", "Vollrath", "Hatco", "Delfield", "Victory", "Continental"];
+const FINISH_MFRS = ["Sherwin-Williams", "Benjamin Moore", "PPG", "Formica", "Wilsonart", "Pionite", "Corian", "Armstrong", "Daltile",
+  "Crossville", "Mohawk", "Interface", "Shaw", "Caesarstone", "Cambria", "Silestone", "Rockfon", "USG", "Johnsonite", "Tarkett", "Roppe"];
 const SHEEN = ["flat", "matte", "eggshell", "satin", "semi-gloss", "gloss", "low sheen", "honed", "polished", "textured", "suede",
   "natural grain", "plain slice"];
 const CATEGORY_BY_PREFIX: [string, string][] = [["WCP", "wood_paneling"], ["WP", "wood_paneling"], ["WD", "wood_paneling"],
@@ -307,6 +309,7 @@ export function parseFinishes(ex: Extracted): Proposed[] {
     if (!h) continue;
     const [hi, mp] = h;
     if (!["manufacturer", "product", "color"].some((f) => f in mp)) continue;
+    if ("model" in mp) continue; // a table with model numbers is an equipment schedule, not a finish schedule
     for (let r = hi + 1; r < t.rows.length; r++) {
       const row = t.rows[r];
       const get = (f: string) => (f in mp && mp[f] < row.length ? row[mp[f]].trim() : "");
@@ -325,13 +328,14 @@ export function parseFinishes(ex: Extracted): Proposed[] {
     }
   }
   const lineRe = /^\s*([A-Z]{1,4}-?\d{1,3}[A-Z]?)\s*(?:[:=\-–|\t]|\s{2,}|\s)\s*(.{6,240})$/;
+  if (ex.kind === "table") return [...out.values()]; // spreadsheet rows were handled above
   for (const [ref, text] of ex.pages) {
     text.split(/\r?\n/).forEach((line, idx) => {
       const m = line.match(lineRe);
       if (!m) return;
       const code = m[1].replace(/\s/g, ""), desc = m[2].trim();
-      const mfr = findMfr(desc);
-      if (!mfr && !/\b(SW|BM) ?\d{4}\b|laminate|solid surface|tile|veneer|paint/i.test(desc)) return;
+      const mfr = FINISH_MFRS.find((m) => new RegExp(`\\b${esc(m)}\\b`, "i").test(desc)) || "";
+      if (!mfr && !/\b(SW|BM) ?\d{4}\b|laminate|solid surface|\btile\b|veneer|\bpaint\b/i.test(desc)) return;
       if (out.has(code)) return;
       const data: Record<string, any> = { ...splitProduct(desc, mfr), code, manufacturer: mfr };
       const loc = desc.match(/(?:location|application|at|@)\s*[:\-]\s*(.+)$/i);
@@ -353,7 +357,7 @@ export function parseEquipment(ex: Extracted): Proposed[] {
     const h = findHeader(t, "code");
     if (!h) continue;
     const [hi, mp] = h;
-    if (!("model" in mp) && !("manufacturer" in mp)) continue;
+    if (!("model" in mp)) continue; // equipment schedules list model numbers; finish schedules do not
     for (let r = hi + 1; r < t.rows.length; r++) {
       const row = t.rows[r];
       const get = (f: string) => (f in mp && mp[f] < row.length ? row[mp[f]].trim() : "");

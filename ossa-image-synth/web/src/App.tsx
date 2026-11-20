@@ -8,6 +8,7 @@ import Readiness from "./components/Readiness";
 import Inspector from "./components/Inspector";
 import Admin from "./components/Admin";
 import AuditView from "./components/AuditView";
+import Basket from "./components/Basket";
 import { StateDot } from "./components/bits";
 
 type View = "canvas" | "admin" | "audit";
@@ -142,6 +143,7 @@ export default function App() {
               <Readiness />
               <div className="canvas-wrap">
                 {view === "canvas" && <Canvas key={project!.id} selected={inspect} onSelect={setInspect} />}
+                {view === "canvas" && !inspect && <Basket onOpen={(k) => setInspect(k)} />}
                 {view === "canvas" && inspect && <Inspector k={inspect} wide={wide} setWide={setWide} onClose={() => setInspect(null)} />}
                 {view === "admin" && <Admin onProjectsChanged={async () => {}} />}
                 {view === "audit" && <AuditView />}

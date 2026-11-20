@@ -96,7 +96,7 @@ export function evaluate(s: State) {
     out.N03 = { recs: r, reqs: [
       req("schedule", "Equipment schedule records approved", a.length, true, `${a.length} approved of ${eq.length}`),
       req("ids", "Each approved item has manufacturer and model", a.length && !incomplete.length, true, incomplete.length ? "incomplete: " + incomplete.join(", ") : ""),
-      req("plan", "Equipment plan accepted for cross-checking", plan, true, "A schedule alone cannot establish locations. Upload and accept an equipment plan."),
+      req("plan", "Equipment plan available for cross-checking", plan || a.some((x) => x.data.location_verified), true, "A schedule alone cannot establish locations. Upload and accept an equipment plan."),
       req("locations", "Every approved item's location verified against the plan", a.length && !unverified.length, true, unverified.length ? "unverified: " + unverified.join(", ") : ""),
       req("reviewed", "All proposals reviewed", !pending, true, `${pending} awaiting review`),
     ] };
@@ -182,11 +182,15 @@ export function executionGate(s: State, er: any) {
   states.N04 = { ...states.N04, requirements: n04.reqs, state: stateOf(n04.reqs, true, false, false, false),
     missing: n04.reqs.filter((r: any) => r.required && !r.satisfied).map((r: any) => r.label + (r.detail ? ` — ${r.detail}` : "")) };
   const required: string[] = er.analysis?.requires_modules || ["N01", "N04", "N05"];
-  const blockers = required.filter((mk) => mk !== "N07" && states[mk].state !== "VALIDATED")
+  // Only the signal to process (the image) is mandatory. Anything else missing runs at the user's responsibility.
+  const warnings = required.filter((mk) => !["N05", "N07"].includes(mk) && states[mk].state !== "VALIDATED")
     .map((mk) => ({ module: mk, name: MODULES[mk].name, state: states[mk].state, missing: states[mk].missing }));
+  for (const i of (er.analysis?.issues || []).filter((x: any) => x.severity === "warn")) warnings.push({ module: "N04", name: "Visual Intent Engine", state: "WARNING", missing: [i.message] });
+  const blockers: any[] = [];
   const img = s.images.find((i) => i.id === er.source_image_id);
-  if (!img || img.status !== "authorized") blockers.push({ module: "N05", name: "Source Image Integrity", state: "BLOCKED", missing: ["The selected source image is not authorised"] });
-  return { ok: !blockers.length, blockers, required_modules: required };
+  if (!img) blockers.push({ module: "N05", name: "Source Image Integrity", state: "BLOCKED", missing: ["No image selected. The image is the one thing an edit cannot run without."] });
+  if (!String(er.instruction || "").trim()) blockers.push({ module: "N04", name: "Visual Intent Engine", state: "BLOCKED", missing: ["Describe the change."] });
+  return { ok: !blockers.length, blockers, warnings, required_modules: required };
 }
 
 // ---------------------------------------------------------------- NODE 04 intent
@@ -213,12 +217,12 @@ export function analyze(s: State, er: any) {
   const text: string = er.instruction || "", low = text.toLowerCase();
   let cats = Object.keys(CATEGORIES).filter((c) => CATEGORIES[c].some((p) => p.test(low)));
   const issues: any[] = [];
-  if (GEOMETRY.some((p) => p.test(low))) issues.push({ severity: "block", code: "geometry_change",
+  if (GEOMETRY.some((p) => p.test(low))) issues.push({ severity: "warn", code: "geometry_change",
     message: "The instruction asks for a geometric change (move, resize, remodel or camera). Image Synth only changes appearance inside an authorised area. Change the model and re-render in Enscape instead." });
-  if (cats.includes("object_addition") && !er.allow_object_additions) issues.push({ severity: "block", code: "object_addition",
+  if (cats.includes("object_addition") && !er.allow_object_additions) issues.push({ severity: "warn", code: "object_addition",
     message: "The instruction appears to add objects. Object additions need explicit approval (tick “Allow object additions”)." });
-  if (er.scope === "global" && !er.global_authorized) issues.push({ severity: "block", code: "global_unauthorized", message: "Edits to the whole image must be explicitly authorised." });
-  if (er.scope === "local" && !er.edit_mask_id) issues.push({ severity: "block", code: "mask_missing", message: "Local edits need an edit area. Draw one in Source Images & Masks." });
+  if (er.scope === "global" && !er.global_authorized) issues.push({ severity: "warn", code: "global_unauthorized", message: "Whole-image edit: nothing is protected by compositing." });
+  if (er.scope === "local" && !er.edit_mask_id) issues.push({ severity: "warn", code: "mask_missing", message: "No edit area marked: the whole image will be sent and nothing is protected by compositing." });
   if (!text.trim()) issues.push({ severity: "block", code: "empty", message: "Describe the change you want." });
   if (cats.includes("lighting_adjustment") && er.scope === "local") issues.push({ severity: "warn", code: "lighting_local",
     message: "Lighting changes inside an area can leave a visible edge at its border. Review the boundary." });
@@ -227,9 +231,9 @@ export function analyze(s: State, er: any) {
   const refs: any[] = [];
   for (const code of mentioned) {
     const rec = finishes.get(code) || finishes.get(code.replace("-", ""));
-    if (!rec) { issues.push({ severity: "block", code: "finish_unknown", message: `Finish code ${code} is not in this project's finish records.` }); refs.push({ code, status: "unknown" }); }
+    if (!rec) { issues.push({ severity: "warn", code: "finish_unknown", message: `Finish code ${code} is not in this project's finish records.` }); refs.push({ code, status: "unknown" }); }
     else if (rec.status !== "approved") {
-      issues.push({ severity: "block", code: "finish_unapproved", message: `Finish ${code} exists but has not been approved yet. Review it in Finish Schedule Intelligence.` });
+      issues.push({ severity: "warn", code: "finish_unapproved", message: `Finish ${code} exists but has not been approved yet. Review it in Finish Schedule Intelligence.` });
       refs.push({ code, status: rec.status, record_id: rec.id });
     } else refs.push({ code, status: "approved", record_id: rec.id, data: rec.data, source: rec.source_ref, origin: rec.origin });
   }

@@ -76,7 +76,7 @@ export default function MaskEditor({ image, onDone }: { image: SourceImage; onDo
     setSaving(true);
     try {
       await api.post(`/api/projects/${project.id}/images/${image.id}/masks`, fd);
-      toast(`${kind === "edit" ? "Edit" : "Protected"} mask saved as draft — approve it to use it`, "ok");
+      toast(`${kind === "edit" ? "Edit" : "Protected"} area saved`, "ok");
       onDone();
     } catch (e) { toast(errText(e), "err"); } finally { setSaving(false); void c; }
   };

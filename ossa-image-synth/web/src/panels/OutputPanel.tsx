@@ -44,6 +44,7 @@ export default function OutputPanel() {
         <SaveButton src={u("final")} filename={`output_v${g.version}.png`} label="Download PNG" />
       </div>
       <div className="muted">“{g.instruction}” · {g.scope === "local" ? "edit area only" : "whole image"} · edited in ChatGPT · {g.composited ? "original pixels restored outside the area" : "not composited"}</div>
+      {g.insufficient_info && <div className="warn-box"><b>Made with insufficient information.</b> This result may be less refined. Missing: {(g.run_warnings || []).join(" · ")}</div>}
       <CompareViewer original={u("source")} output={u("final")} diff={u("diff")} mask={u("mask")} raw={u("raw")} />
 
       <div className="card" data-testid="checks">

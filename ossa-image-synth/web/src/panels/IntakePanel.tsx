@@ -24,7 +24,8 @@ export default function IntakePanel() {
     try {
       const res = await api.post<any[]>(`/api/projects/${project.id}/documents`, fd);
       const errs = res.filter((r) => r.error);
-      errs.forEach((e) => toast(`${e.name}: ${e.error}`, "err"));
+      errs.filter((e) => !e.skipped).forEach((e) => toast(`${e.name}: ${e.error}`, "err"));
+      errs.filter((e) => e.skipped).forEach((e) => toast(`${e.name}: ${e.error}`, "info"));
       const ok = res.length - errs.length;
       if (ok) toast(`${ok} file(s) uploaded and processed. Review the proposed mappings below.`, "ok");
     } catch (e) {
@@ -53,10 +54,10 @@ export default function IntakePanel() {
           <input ref={input} type="file" multiple hidden data-testid="file-input" onChange={(e) => e.target.files && upload(e.target.files)} />
         </div>
       )}
-      <div className="info-box">Uploading a file does not satisfy a module. Each proposed mapping and every extracted record must be reviewed.</div>
+      <div className="info-box">Image Synth sorts each file into the modules it can feed. If a file has data the built-in reader cannot find, Claude reads it automatically. You only approve the information it found, inside each module.</div>
       <div style={{ overflowX: "auto" }}>
       <table className="t">
-        <thead><tr><th>Document</th><th>Classification</th><th>Proposed module mapping</th><th>Status</th></tr></thead>
+        <thead><tr><th>Document</th><th>Classification</th><th>Feeds these modules</th><th>Status</th></tr></thead>
         <tbody>
           {(docs.data || []).map((d) => (
             <tr key={d.id}>
@@ -86,16 +87,18 @@ export default function IntakePanel() {
                 {d.mappings.length === 0 && <span className="dim">{d.status === "unsupported" ? "—" : "No module uses this type"}</span>}
                 {d.mappings.map((m: any) => (
                   <div key={m.id} className="row" style={{ marginBottom: 3, flexWrap: "nowrap", whiteSpace: "nowrap" }}>
-                    <span className="mono">{m.module_key}</span> {MOD_NAMES[m.module_key]} <StatusPill status={m.status} />
-                    {canEdit && m.status !== "accepted" && <button className="small ok" onClick={() => run(async () => { await api.patch(`/api/projects/${project.id}/mappings/${m.id}`, { status: "accepted" }); docs.reload(); })}>Accept</button>}
-                    {canEdit && m.status !== "rejected" && <button className="small" onClick={() => run(async () => { await api.patch(`/api/projects/${project.id}/mappings/${m.id}`, { status: "rejected" }); docs.reload(); })}>Reject</button>}
+                    <span className="mono">{m.module_key}</span> {MOD_NAMES[m.module_key]} {m.status === "rejected" ? <span className="pill err">removed</span> : <span className="pill ok">✓</span>}
+                    {canEdit && m.status !== "rejected" && <button className="small ghost" title="This file does not belong in this module" onClick={() => run(async () => { await api.patch(`/api/projects/${project.id}/mappings/${m.id}`, { status: "rejected" }); docs.reload(); })}>Wrong module</button>}
+                    {canEdit && m.status === "rejected" && <button className="small ghost" onClick={() => run(async () => { await api.patch(`/api/projects/${project.id}/mappings/${m.id}`, { status: "accepted" }); docs.reload(); })}>Undo</button>}
                   </div>
                 ))}
               </td>
               <td>
                 <StatusPill status={d.status} />
+                {d.meta?.note && <div className="dim" style={{ fontSize: 11, marginTop: 4 }}>{d.meta.note}</div>}
                 {d.error && <div className={d.status === "unsupported" ? "warn-box" : "err-box"} style={{ fontSize: 11, marginTop: 4 }}>{d.error}</div>}
                 {(d.meta?.warnings || []).map((w: string, i: number) => <div key={i} className="warn-box" style={{ fontSize: 11, marginTop: 4 }}>{w}</div>)}
+                {canEdit && <div style={{ marginTop: 4 }}><button className="small ghost" onClick={() => run(async () => { await api.del(`/api/projects/${project.id}/documents/${d.id}`); docs.reload(); }, "File removed")}>Remove file</button></div>}
                 {canEdit && d.status === "error" && <button className="small" onClick={() => run(async () => { await api.post(`/api/projects/${project.id}/documents/${d.id}/reprocess`); docs.reload(); })}>Retry</button>}
                 {canEdit && d.status === "processed" && d.doc_type !== "source_image" && <div style={{ marginTop: 4 }}><button className="small" title="Claude reads the document (useful for scanned PDFs and unusual layouts). Its readings are marked as AI assumptions until you approve them."
                   onClick={() => run(async () => { const r = await api.post(`/api/projects/${project.id}/documents/${d.id}/ai-read`); docs.reload(); return r; }, "Claude finished reading. Review its proposals in the modules.")}>Read with Claude</button></div>}

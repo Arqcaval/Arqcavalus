@@ -52,22 +52,40 @@ class Store {
     db.collection("rules").onSnapshot((snap: any) => { this.s.rules = snap.docs.map((d: any) => ({ id: d.id, ...d.data() })); this.emit(); }, () => {});
   }
 
+  private subscribedFor: string | null = null;
   select(pid: string | null) {
-    if (pid === this.pid) return;
+    // Re-subscribe if the store connected after this project was first chosen.
+    if (pid === this.pid && (pid === null || this.subscribedFor === pid)) return;
     this.subs.forEach((u) => u());
     this.subs = [];
     this.pid = pid;
     this.loaded.clear();
     this.s = { ...this.s, project: this.projects.find((p) => p.id === pid) || null, documents: [], records: [], images: [], requests: [], runs: [], outputs: [], qa: [], audit: [], hashFailures: new Set() };
+    this.subscribedFor = null;
     if (!pid || !this.db) { this.emit(); return; }
+    this.subscribedFor = pid;
     for (const col of COLS) {
       this.subs.push(this.db.collection(`projects/${pid}/${col}`).onSnapshot((snap: any) => {
         (this.s as any)[col] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
         this.loaded.add(col);
         this.emit();
+        if (col === "documents" || col === "records") this.runPending();
       }, () => {}));
     }
     this.emit();
+  }
+
+  /** Re-read documents flagged `reprocess` (set by an upgrade or by Claude), once, in this tab. */
+  private pendingBusy = false;
+  async runPending() {
+    if (this.pendingBusy || !this.canWrite || !this.loaded.has("documents") || !this.loaded.has("records") || !this.loaded.has("images")) return;
+    const d = this.s.documents.find((x) => x.reprocess && x.status !== "processing");
+    if (!d) return;
+    this.pendingBusy = true;
+    try {
+      const lease = await this.col("documents").doc(d.id).acquire({ holder: newId(), ttlMs: 120000 }).catch(() => ({ acquired: true }));
+      if (lease.acquired) { await this.patch("documents", d.id, { reprocess: false }); await processDocument({ ...d, reprocess: false }); }
+    } finally { this.pendingBusy = false; setTimeout(() => this.runPending(), 50); }
   }
 
   // ---- low-level helpers
@@ -127,29 +145,57 @@ export async function processDocument(d: any, file?: Blob) {
       await store.audit("document.unsupported", d.id, { reason: ex.unsupported });
       return;
     }
-    const modules = P.TYPE_MODULES[upd.doc_type] || [];
-    const mappings = [...keep];
-    for (const mk of modules) if (!mappings.some((m) => m.module_key === mk))
-      mappings.push({ id: newId(), module_key: mk, status: "proposed", confidence: upd.classification_confidence ?? 1,
-        evidence: [`document classified as ${upd.doc_type}`] });
+    const typeModules = P.TYPE_MODULES[upd.doc_type] || [];
+    // Every reader runs on every document: one drawing set can feed several modules at once.
     let props: P.Proposed[] = [];
     if (ex.kind !== "image") {
-      if (modules.includes("N02")) props = props.concat(P.parseFinishes(ex));
-      if (modules.includes("N03") && ["equipment_schedule", "cut_sheet"].includes(upd.doc_type)) props = props.concat(P.parseEquipment(ex));
+      props = props.concat(P.parseFinishes(ex), P.parseEquipment(ex));
       if (upd.doc_type === "equipment_plan") props = props.concat(P.findEquipmentOnPlan(ex, store.s.records.filter((r) => r.record_type === "equipment" && r.status !== "rejected").map((r) => r.key)));
-      if (modules.includes("N01")) props = props.concat(P.parseProject(ex, d.original_name));
+      if (ex.kind !== "table" || typeModules.includes("N01"))
+        props = props.concat(P.parseProject(ex, d.original_name).filter((r) => r.key !== "project_name_candidate" || typeModules.includes("N01")));
+    }
+    const modules = [...new Set([...typeModules, ...props.map((p) => p.module_key)])].filter((mk) => mk !== "N04" || typeModules.includes("N04"));
+    const mappings = [...keep];
+    for (const mk of modules) if (!mappings.some((m) => m.module_key === mk)) {
+      const n = props.filter((p) => p.module_key === mk).length;
+      mappings.push({ id: newId(), module_key: mk, status: "accepted", auto: true, confidence: upd.classification_confidence ?? 1,
+        evidence: [n ? `${n} item(s) found for this module` : `document classified as ${upd.doc_type}`] });
     }
     let n = 0;
     for (const p of props) {
       if (store.s.records.some((r) => r.document_id === d.id && r.record_type === p.record_type && r.key === p.key && r.status !== "proposed")) continue;
-      await store.put("records", newId(), { ...p, notes: p.notes.join("; "), status: "proposed", origin: "parser", document_id: d.id, created_at: now() });
+      await store.put("records", newId(), { ...p, notes: p.notes.join("; "), status: "approved", auto_approved: true, reviewed_by: "Image Synth (automatic)", reviewed_at: now(), origin: "parser", document_id: d.id, created_at: now() });
       n++;
     }
     if (P.IMAGE_EXT.includes(d.ext) && upd.doc_type === "source_image" && !store.s.images.some((i) => i.document_id === d.id))
       await store.put("images", newId(), { document_id: d.id, label: d.original_name, width: ex.image!.width, height: ex.image!.height,
-        sha256: d.sha256, asset_id: d.asset_id, ext: d.ext, status: "candidate", masks: [], created_at: now() });
+        sha256: d.sha256, asset_id: d.asset_id, ext: d.ext, status: "authorized", authorized_by: "Image Synth (automatic)", authorized_at: now(), masks: [], created_at: now() });
+    // Plan evidence verifies the scheduled item's location.
+    const locTags = props.filter((p) => p.record_type === "equipment_location").map((p) => p.key);
+    if (locTags.length) {
+      const fresh = await store.col("records").get();
+      for (const r of fresh.docs.map((x: any) => ({ id: x.id, ...x.data() })))
+        if (r.record_type === "equipment" && locTags.includes(r.key) && !r.data?.location_verified)
+          await store.patch("records", r.id, { data: { ...r.data, location_verified: true, location_evidence: `${d.original_name} (equipment plan)` } });
+    }
+    if (upd.doc_type !== "equipment_plan" && props.some((p) => p.record_type === "equipment"))
+      for (const pd of store.s.documents.filter((x) => x.doc_type === "equipment_plan" && x.id !== d.id)) await store.patch("documents", pd.id, { reprocess: true });
+    // Nothing found by the built-in readers in a document that should hold data: let Claude read it.
+    const wantsData = typeModules.some((mk) => ["N01", "N02", "N03"].includes(mk));
+    const foundForType = props.filter((p) => typeModules.includes(p.module_key) && p.key !== "project_name_candidate").length;
+    let aiNote = "";
+    if (ex.kind !== "image" && wantsData && !foundForType && store.sample) {
+      await store.patch("documents", d.id, { ...upd, mappings, note: "Claude is reading this document…" });
+      try {
+        const r = await aiRead({ ...d, ...upd }, P.fullText(ex));
+        n += r.records;
+        aiNote = r.records ? `Claude read this document and proposed ${r.records} item(s).` : "Claude found no schedule data in this document.";
+        for (const mk of r.modules) if (!mappings.some((m) => m.module_key === mk))
+          mappings.push({ id: newId(), module_key: mk, status: "accepted", auto: true, confidence: 0.6, evidence: ["items read by Claude"] });
+      } catch (e: any) { aiNote = `Claude could not read this document: ${e?.message || e}`; }
+    }
     await store.patch("documents", d.id, { ...upd, status: "processed", error: "", mappings,
-      note: modules.length ? "" : "No module can use this document as classified. Change the classification if it is wrong." });
+      note: aiNote || (modules.length ? "" : "No module can use this document as classified. Change the classification if it is wrong.") });
     await store.audit("document.processed", d.id, { doc_type: upd.doc_type, modules, records_proposed: n });
   } catch (e: any) {
     await store.patch("documents", d.id, { status: "error", error: String(e?.message || e) });
@@ -169,6 +215,7 @@ async function uploadFiles(files: File[]) {
     try {
       const sha = await I.sha256(f);
       const dup = store.s.documents.find((x) => x.sha256 === sha);
+      if (dup) { results.push({ name, skipped: true, error: `already uploaded as “${dup.original_name}”, skipped` }); continue; }
       const { asset_id, note } = await storeOriginal(f, ext);
       const d: any = { id: newId(), original_name: name, ext, size: f.size, sha256: sha, asset_id, storage_note: note, doc_type: "unknown",
         classification_confidence: 0, classification_evidence: [], classification_source: "auto", status: "uploaded", error: "",
@@ -185,10 +232,10 @@ async function uploadFiles(files: File[]) {
 // ------------------------------------------------------------------ Claude-assisted reading
 const AI_EXTRACT = `You read architectural project documents for OSSA Studio. Extract ONLY what the document states; never guess.
 Return JSON: {"finishes":[{"code","manufacturer","product","category","color_name","texture","application","where_found"}],
-"equipment":[{"tag","description","manufacturer","model","dimensions","schedule_location","where_found"}],
+"equipment":[{"tag","description","manufacturer","model","dimensions","schedule_location","where_found","on_plan"}],
 "project":{"project_name","client","address","rooms":[{"number","name","where_found"}],"sheets":[{"sheet","title"}]}}.
 category is one of paint, laminate, solid_surface, tile, wood_paneling, acoustic_ceiling, stone, quartz, metal, glass, carpet, other.
-Use empty arrays/strings when absent. where_found = page or row reference.`;
+Use empty arrays/strings when absent. where_found = page or row reference. on_plan = true only if the item's tag is drawn on a floor/equipment plan in this document.`;
 
 async function pdfPageImages(blob: Blob, max = 3): Promise<Blob[]> {
   const lib = (window as any).pdfjsLib;
@@ -215,16 +262,20 @@ async function shrinkImage(blob: Blob, max = 1568): Promise<Blob> {
   return c.convertToBlob({ type: "image/jpeg", quality: 0.85 });
 }
 
-async function aiRead(d: any) {
+async function aiRead(d: any, fullText?: string) {
   if (!store.sample) throw new Error("Claude reading is not available in this view.");
   const blob = await originalBlob(d);
   let images: Blob[] = [];
-  let text = d.text_excerpt || "";
-  if (!text.trim() && blob) images = d.ext === "pdf" ? await pdfPageImages(blob) : P.IMAGE_EXT.includes(d.ext) ? [await shrinkImage(blob)] : [];
+  let text = fullText ?? d.text_excerpt ?? "";
+  // Drawings exported from CAD scramble table text, so short PDFs are also shown to Claude as page images.
+  let maxImages = 4;
+  try { maxImages = Math.min(4, (await store.sample.limits())?.images?.maxCount ?? 4); } catch { /* keep default */ }
+  if (blob && d.ext === "pdf" && (!text.trim() || (d.page_count || 0) <= 4)) images = await pdfPageImages(blob, maxImages);
+  else if (blob && !text.trim() && P.IMAGE_EXT.includes(d.ext)) images = [await shrinkImage(blob)];
   if (!text.trim() && !images.length) throw new Error("This document has no readable content.");
-  const input = `${AI_EXTRACT}\n\nDocument: ${d.original_name}\n${text ? "Text:\n" + text.slice(0, 60000) : "(see attached page images)"}`;
+  const input = `${AI_EXTRACT}\n\nDocument: ${d.original_name}\n${images.length ? "The attached images are the document's pages; trust them over the extracted text where they differ.\n" : ""}${text ? "Extracted text (may be scrambled):\n" + text.slice(0, 60000) : ""}`;
   const res: any = await store.sample.json(input, images.length ? { images, modelTier: "complex" } : { modelTier: "complex" });
-  const base = { status: "proposed", origin: "ai", document_id: d.id, confidence: 0.4, created_at: now(), notes: "Read by Claude. Verify against the document before approving." };
+  const base = { status: "approved", auto_approved: true, reviewed_by: "Image Synth (automatic)", reviewed_at: now(), origin: "ai", document_id: d.id, confidence: 0.4, created_at: now(), notes: "Read by Claude from the document." };
   let n = 0;
   for (const f of res?.finishes || []) if (f.code) {
     const cat = f.category || P.materialCategory(f.code, `${f.manufacturer} ${f.product}`)[0];
@@ -233,14 +284,16 @@ async function aiRead(d: any) {
   }
   for (const e of res?.equipment || []) if (e.tag) {
     await store.put("records", newId(), { ...base, module_key: "N03", record_type: "equipment", key: String(e.tag).toUpperCase(),
-      data: { ...e, location_verified: false }, source_ref: `${d.original_name}${e.where_found ? " · " + e.where_found : ""} (Claude)`, evidence: `${e.tag} ${e.description || ""}` }); n++;
+      data: { ...e, location_verified: !!e.on_plan, ...(e.on_plan ? { location_evidence: `${d.original_name}: Claude found the item on the equipment plan` } : {}) }, source_ref: `${d.original_name}${e.where_found ? " · " + e.where_found : ""} (Claude)`, evidence: `${e.tag} ${e.description || ""}` }); n++;
   }
   const pj = res?.project || {};
   if (pj.project_name) { await store.put("records", newId(), { ...base, module_key: "N01", record_type: "project_info", key: "project_name", data: { field: "project_name", value: pj.project_name }, source_ref: `${d.original_name} (Claude)`, evidence: pj.project_name }); n++; }
   for (const r of pj.rooms || []) if (r.name) { await store.put("records", newId(), { ...base, module_key: "N01", record_type: "room", key: `${r.number || ""} ${r.name}`.trim(), data: r, source_ref: `${d.original_name}${r.where_found ? " · " + r.where_found : ""} (Claude)`, evidence: r.name }); n++; }
   for (const sh of pj.sheets || []) if (sh.sheet) { await store.put("records", newId(), { ...base, module_key: "N01", record_type: "drawing_ref", key: sh.sheet, data: sh, source_ref: `${d.original_name} (Claude)`, evidence: `${sh.sheet} ${sh.title || ""}` }); n++; }
   await store.audit("document.ai_read", d.id, { records: n });
-  return { records: n };
+  const modules = [...new Set([...(res?.finishes?.length ? ["N02"] : []), ...(res?.equipment?.length ? ["N03"] : []),
+    ...(pj.project_name || pj.rooms?.length || pj.sheets?.length ? ["N01"] : [])])];
+  return { records: n, modules };
 }
 
 // ------------------------------------------------------------------ image helpers
@@ -248,7 +301,8 @@ async function loadRegion(er: any, img: any) {
   const m = (id: string | null) => (img.masks || []).find((x: any) => x.id === id);
   const edit = er.edit_mask_id ? await I.blobToMask(await store.blob(m(er.edit_mask_id).asset_id), img.width, img.height) : null;
   const prot = er.protected_mask_id ? await I.blobToMask(await store.blob(m(er.protected_mask_id).asset_id), img.width, img.height) : null;
-  return { region: I.effectiveRegion(img.width, img.height, edit, prot, er.scope), prot };
+  // No area marked: the whole image is the edit region (run at the user's responsibility).
+  return { region: I.effectiveRegion(img.width, img.height, edit, prot, edit ? er.scope : "global"), prot };
 }
 
 /** Pad (never stretch) the source to a 3:2, 2:3 or 1:1 canvas that image editors keep. */
@@ -321,7 +375,7 @@ async function importResult(run: any, file: Blob) {
   const gid = newId();
   await store.put("outputs", gid, { request_id: er.id, run_id: run.id, image_id: img.id, version, raw_asset_id: rawId, final_asset_id: finalId,
     composited: !!er.composite, width: final.w, height: final.h, validation: report, checklist: I.buildChecklist(er.analysis), status: "pending_review",
-    engine: run.engine, instruction: er.instruction, scope: er.scope, created_at: now(), decided_by: null, decision_reason: "", override_reason: "" });
+    engine: run.engine, instruction: er.instruction, scope: er.scope, insufficient_info: !!run.insufficient_info, run_warnings: run.warnings || [], created_at: now(), decided_by: null, decision_reason: "", override_reason: "" });
   await store.patch("runs", run.id, { status: "returned", output_id: gid, returned_at: now() });
   if (!report.automated_passed) {
     const failed = report.checks.filter((c: any) => c.blocking && !c.passed);
@@ -341,7 +395,7 @@ const docOut = (d: any) => ({ ...d, record_count: store.s.records.filter((r) => 
   source_image_id: store.s.images.find((i) => i.document_id === d.id)?.id || null, doc_type_label: P.DOC_TYPES[d.doc_type] || d.doc_type,
   meta: { warnings: d.warnings || [], duplicate_of: d.duplicate_of, note: d.note } });
 const genOut = (g: any) => ({ ...g, checklist_complete: I.checklistComplete(g.checklist),
-  approval_blocked: !g.validation?.automated_passed || !I.checklistComplete(g.checklist) });
+  approval_blocked: !g.validation?.automated_passed });
 const modulesOut = () => {
   const m = R.evaluate(store.s);
   return { modules: m, execution_ready: ["N01", "N04", "N05"].every((k) => m[k].state === "VALIDATED") };
@@ -381,6 +435,14 @@ const routes: [string, RegExp, H][] = [
     await store.qa("user_correction", `Document reclassified: ${d.original_name}`, `${old} → ${b.doc_type}. ${b.reason || ""}`, { document_id: d.id });
     await store.audit("document.reclassify", d.id, { from: old, to: b.doc_type });
     await processDocument(nd);
+    return ok;
+  }],
+  ["DELETE", /^\/api\/projects\/\w+\/documents\/(\w+)$/, async (m) => {
+    const d = need(store.s.documents.find((x) => x.id === m[1]), "Document");
+    for (const r of store.s.records.filter((x) => x.document_id === d.id && x.status === "proposed")) await store.col("records").doc(r.id).delete();
+    for (const i of store.s.images.filter((x) => x.document_id === d.id && x.status !== "authorized")) await store.col("images").doc(i.id).delete();
+    await store.col("documents").doc(d.id).delete();
+    await store.audit("document.remove", d.id, { name: d.original_name });
     return ok;
   }],
   ["POST", /^\/api\/projects\/\w+\/documents\/(\w+)\/reprocess$/, async (m) => { await processDocument(need(store.s.documents.find((x) => x.id === m[1]), "Document")); return ok; }],
@@ -449,7 +511,7 @@ const routes: [string, RegExp, H][] = [
     if (!cov) throw new Error("The mask is empty. Paint an area first.");
     const assetId = await store.upload(blob, "image/png");
     const rec = { id: newId(), kind: b.get("kind"), label: b.get("label") || `${b.get("kind")} mask`, asset_id: assetId, sha256: await I.sha256(blob),
-      coverage: Math.round(cov * 1e5) / 1e3, status: "draft", source_image_id: img.id, created_at: now() };
+      coverage: Math.round(cov * 1e5) / 1e3, status: "approved", source_image_id: img.id, created_at: now() };
     await patchImageMasks(img, (ms) => [...ms, rec]);
     await store.audit("mask.create", rec.id, { kind: rec.kind, coverage_pct: rec.coverage });
     return rec;
@@ -476,6 +538,7 @@ const routes: [string, RegExp, H][] = [
     need(store.s.images.find((x) => x.id === b.source_image_id), "Image");
     const er: any = { ...b, id: newId(), status: "draft", created_at: now(), created_by: store.me };
     er.analysis = R.analyze(store.s, er);
+    if (!er.analysis.blocking) { er.status = "approved"; er.approved_by = "Image Synth (automatic)"; }
     await store.put("requests", er.id, er);
     await store.audit("edit_request.create", er.id, { instruction: er.instruction });
     return er;
@@ -486,9 +549,9 @@ const routes: [string, RegExp, H][] = [
     Object.assign(er, changes);
     if (Object.keys(changes).length) er.status = "draft";
     er.analysis = R.analyze(store.s, er);
+    if (status !== "draft" && !er.analysis.blocking) er.status = "approved";
     if (status === "approved") {
       if (er.analysis.blocking) throw new Error("Cannot approve yet: " + er.analysis.issues.filter((i: any) => i.severity === "block").map((i: any) => i.message).join(" "));
-      if (er.scope === "local" && R.findMask(store.s, er.edit_mask_id)?.status !== "approved") throw new Error("Approve the edit mask first (Source Images & Masks).");
       er.status = "approved"; er.approved_by = store.me;
     }
     const { id, ...rest } = er;
@@ -510,7 +573,7 @@ const routes: [string, RegExp, H][] = [
     const out: any = {};
     const upd: any = { decided_by: store.me, decided_at: now(), decision_reason: b.reason || "" };
     if (b.decision === "approve") {
-      const autoOk = g.validation?.automated_passed, clOk = I.checklistComplete(g.checklist);
+      const autoOk = g.validation?.automated_passed, clOk = true; // the visual checklist is a reminder, not a gate
       if (!(autoOk && clOk)) {
         const failed = (g.validation?.checks || []).filter((c: any) => c.blocking && !c.passed).map((c: any) => c.label);
         if (!clOk) failed.push("reviewer checklist incomplete");
@@ -563,16 +626,19 @@ List, as short bullets: (1) whether the requested change is visible and matches 
   ["POST", /^\/api\/projects\/\w+\/runs\/plan$/, (_m, b) => {
     const er = need(store.s.requests.find((x) => x.id === b.edit_request_id), "Edit request");
     const gate = R.executionGate(store.s, er);
-    return { gate, ready: gate.ok && er.status === "approved", prompt: er.analysis?.prompt || "", er };
+    return { gate, ready: gate.ok, prompt: er.analysis?.prompt || "", er };
   }],
   ["POST", /^\/api\/projects\/\w+\/runs$/, async (_m, b) => {
     const er = need(store.s.requests.find((x) => x.id === b.edit_request_id), "Edit request");
     const gate = R.executionGate(store.s, er);
-    if (!gate.ok || er.status !== "approved") throw new Error("Execution is blocked. Resolve the listed modules first.");
+    if (!gate.ok) throw new Error(gate.blockers.map((b: any) => b.missing.join(" ")).join(" "));
     const img = need(store.s.images.find((x) => x.id === er.source_image_id), "Image");
     if ((await I.sha256(await store.blob(img.asset_id))) !== img.sha256) { store.s.hashFailures.add(img.id); throw new Error("The source image fingerprint does not match. Run refused."); }
     const id = newId();
-    await store.put("runs", id, { request_id: er.id, image_id: img.id, engine: "chatgpt", prompt: er.analysis.prompt, status: "awaiting_result", created_at: now(), created_by: store.me });
+    const warned = gate.warnings.length > 0;
+    await store.put("runs", id, { request_id: er.id, image_id: img.id, engine: "chatgpt", prompt: er.analysis.prompt, status: "awaiting_result", created_at: now(), created_by: store.me,
+      insufficient_info: warned, warnings: gate.warnings.map((w: any) => `${w.name}: ${w.missing.join("; ")}`) });
+    if (warned) await store.qa("override", "Run started with insufficient information", gate.warnings.map((w: any) => `${w.name}: ${w.missing.join("; ")}`).join("\n"), { run_id: id });
     await store.audit("run.start", id, { engine: "chatgpt", request: er.id });
     return { id };
   }],
