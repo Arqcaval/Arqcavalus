@@ -1,0 +1,28 @@
+services:
+  image-synth:
+    build: .
+    image: ossa/image-synth:latest
+    env_file: .env
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - synth-data:/data
+    restart: unless-stopped
+
+  # Optional HTTPS front end for sharing over the internet:
+  #   docker compose --profile https up -d   (requires DOMAIN in .env and DNS pointing at this host)
+  caddy:
+    image: caddy:2.8
+    profiles: ["https"]
+    command: caddy reverse-proxy --from ${DOMAIN:-localhost} --to image-synth:8000
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+    depends_on: [image-synth]
+    restart: unless-stopped
+
+volumes:
+  synth-data:
+  caddy-data:

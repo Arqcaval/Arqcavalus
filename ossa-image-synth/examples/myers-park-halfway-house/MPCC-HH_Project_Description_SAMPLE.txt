@@ -1,0 +1,13 @@
+SAMPLE PROJECT DESCRIPTION (fictional details for demonstration)
+Project: Myers Park Country Club - Halfway House
+Project Number: MPCC-HH
+Client: Myers Park Country Club
+Architect: OSSA Studio
+Scope: Interior renovation of the golf course halfway house servery and bar.
+Rooms: Servery 101, Bar 102, Seating 103, Storage 104
+Sheets:
+A1.01 FLOOR PLAN
+A3.01 REFLECTED CEILING PLAN
+A6.01 INTERIOR ELEVATIONS
+A6.02 BAR ELEVATIONS AND SECTIONS
+Existing structure to remain. Do not alter the window openings.
