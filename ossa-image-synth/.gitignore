@@ -8,3 +8,8 @@ data/
 backend/data/
 e2e/screenshots/
 *.tsbuildinfo
+web/node_modules
+web/dist
+web/image-synth.html
+image-synth-huggingface.zip
+ossa-image-synth.zip
