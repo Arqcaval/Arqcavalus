@@ -6,6 +6,7 @@ or included in project exports.
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def _float(name: str, default: float) -> float:
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("IMAGE_SYNTH_DATA_DIR", "./data")).resolve())
     database_url: str = field(default_factory=lambda: os.environ.get("DATABASE_URL", ""))
-    secret_key: str = field(default_factory=lambda: os.environ.get("SECRET_KEY", "dev-insecure-change-me"))
+    secret_key: str = field(default_factory=lambda: os.environ.get("SECRET_KEY", ""))
     admin_email: str = field(default_factory=lambda: os.environ.get("ADMIN_EMAIL", "admin@ossa.studio"))
     admin_password: str = field(default_factory=lambda: os.environ.get("ADMIN_PASSWORD", ""))
     seed_reference_project: bool = field(default_factory=lambda: os.environ.get("SEED_REFERENCE_PROJECT", "1") == "1")
@@ -49,6 +50,19 @@ class Settings:
 
     static_dir: str = field(default_factory=lambda: os.environ.get("STATIC_DIR", ""))
     run_worker: bool = field(default_factory=lambda: os.environ.get("RUN_WORKER", "1") == "1")
+
+    @property
+    def effective_secret(self) -> str:
+        """SECRET_KEY from the environment, otherwise a random key generated once and kept in the data dir."""
+        if self.secret_key:
+            return self.secret_key
+        path = self.data_dir / "secret_key"
+        if not path.exists():
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(secrets.token_urlsafe(48))
+            path.chmod(0o600)
+        self.secret_key = path.read_text().strip()
+        return self.secret_key
 
     @property
     def db_url(self) -> str:

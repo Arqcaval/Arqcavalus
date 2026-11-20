@@ -31,7 +31,7 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def _token_hash(token: str) -> str:
-    return hashlib.sha256((settings.secret_key + token).encode()).hexdigest()
+    return hashlib.sha256((settings.effective_secret + token).encode()).hexdigest()
 
 
 def create_session(db: Session, user: User) -> str:

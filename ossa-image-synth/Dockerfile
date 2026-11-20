@@ -19,7 +19,8 @@ COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/app ./app
 COPY --from=web /web/dist ./static
-RUN useradd --system --uid 10001 synth && mkdir -p /data && chown synth /data
+# uid 1000 so the image also runs on hosts that force that user (e.g. Hugging Face Spaces)
+RUN useradd --uid 1000 --create-home synth && mkdir -p /data && chown synth /data
 USER synth
 VOLUME ["/data"]
 EXPOSE 8000
